@@ -1,0 +1,37 @@
+services:
+  db:
+    build: ./docker/postgres
+    image: ladebahn/postgres:16-postgis
+    container_name: ladebahn-db
+    environment:
+      POSTGRES_DB: ladebahn
+      POSTGRES_USER: ladebahn
+      POSTGRES_PASSWORD: ladebahn
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - work_mem=16MB
+      - -c
+      - effective_cache_size=1536MB
+      - -c
+      - max_connections=100
+      - -c
+      - log_min_duration_statement=200
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ladebahn -d ladebahn"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+volumes:
+  pgdata:

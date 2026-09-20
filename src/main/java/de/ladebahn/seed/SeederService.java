@@ -14,7 +14,6 @@ public class SeederService {
 
     private static final String[] CONNECTOR_TYPES = {"TYPE2", "CCS", "CHADEMO"};
     private static final double[] POWER_LEVELS    = {11, 22, 50, 150, 300, 400};
-    private static final String[] STATUSES        = {"AVAILABLE", "OCCUPIED", "FAULTED", "UNAVAILABLE"};
 
     private final JdbcTemplate jdbc;
 
@@ -56,7 +55,17 @@ public class SeederService {
     }
 
     /**
-     * Sites cluster around cities (70%) or scatter along corridors (30%).
+     * 70% urban, 30% corridor.
+     *
+     * Urban sites use a LOG-NORMAL radius from the city centre, which peaks around
+     * 4-6 km and tails out past 20 km. This models the real pattern: few sites in the
+     * dense historic core, most in the surrounding ring of retail parks and arterials.
+     * (An earlier version used abs(gaussian), a half-normal, which piled almost every
+     * site within 1-2 km of the exact centre coordinate.)
+     *
+     * Corridor sites follow a per-city fixed bearing, so they string out like a
+     * motorway rather than forming a uniform halo.
+     *
      * Popularity follows a Zipf-like curve: a few sites absorb most traffic.
      */
     private List<Long> insertSites(SeedScale scale, List<Long> operatorIds, Random rnd) {
@@ -65,24 +74,24 @@ public class SeederService {
         for (int i = 0; i < scale.sites; i++) {
             double lat, lon;
             String city;
+            City c = pickWeightedCity(rnd);
 
             if (rnd.nextDouble() < 0.70) {
-                City c = pickWeightedCity(rnd);
                 city = c.name();
-                double radiusKm = Math.abs(rnd.nextGaussian()) * 8.0;      // tight urban cluster
+                double radiusKm = Math.exp(1.5 + rnd.nextGaussian() * 0.55);
                 double bearing  = rnd.nextDouble() * 2 * Math.PI;
                 lat = c.lat() + (radiusKm / 111.0) * Math.cos(bearing);
                 lon = c.lon() + (radiusKm / (111.0 * Math.cos(Math.toRadians(c.lat())))) * Math.sin(bearing);
             } else {
-                City c = pickWeightedCity(rnd);
                 city = c.name() + " Umland";
-                double radiusKm = 20 + rnd.nextDouble() * 90;               // motorway corridor
-                double bearing  = rnd.nextDouble() * 2 * Math.PI;
+                double corridorBearing = (Math.abs(c.name().hashCode()) % 360) * Math.PI / 180.0;
+                double bearing  = corridorBearing + rnd.nextGaussian() * 0.25;
+                double radiusKm = 20 + rnd.nextDouble() * 90;
                 lat = c.lat() + (radiusKm / 111.0) * Math.cos(bearing);
                 lon = c.lon() + (radiusKm / (111.0 * Math.cos(Math.toRadians(c.lat())))) * Math.sin(bearing);
             }
 
-            double popularity = 1.0 / Math.pow(i + 1, 0.8);                 // Zipf
+            double popularity = 1.0 / Math.pow(i + 1, 0.8);
             String street = GermanGeography.STREETS[rnd.nextInt(GermanGeography.STREETS.length)]
                           + " " + (1 + rnd.nextInt(180));
             String postcode = String.format("%05d", 10000 + rnd.nextInt(89999));
@@ -110,7 +119,7 @@ public class SeederService {
             int count = roll < 0.60 ? 2
                       : roll < 0.85 ? 4
                       : roll < 0.97 ? 8 + rnd.nextInt(8)
-                      : 24 + rnd.nextInt(17);                               // rare mega-hub
+                      : 24 + rnd.nextInt(17);
 
             for (int i = 0; i < count; i++) {
                 batch.add(new Object[]{

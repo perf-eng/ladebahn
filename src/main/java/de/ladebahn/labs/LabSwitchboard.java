@@ -1,7 +1,9 @@
 package de.ladebahn.labs;
 
-import io.micrometer.core.instrument.Gauge;
-import io.micrometer.core.instrument.MeterRegistry;
+import io.opentelemetry.api.GlobalOpenTelemetry;
+import io.opentelemetry.api.common.AttributeKey;
+import io.opentelemetry.api.common.Attributes;
+import io.opentelemetry.api.metrics.Meter;
 import org.springframework.stereotype.Component;
 
 import java.util.List;
@@ -18,19 +20,26 @@ public class LabSwitchboard {
     private static final List<String> KNOWN =
         List.of(N_PLUS_ONE, DROP_INDEX, SLOW_RESPONSE);
 
+    private static final AttributeKey<String> LAB_KEY = AttributeKey.stringKey("lab");
+
     private final Map<String, Boolean> state  = new ConcurrentHashMap<>();
     private final Map<String, Integer> params = new ConcurrentHashMap<>();
 
-    public LabSwitchboard(MeterRegistry registry) {
+    public LabSwitchboard() {
         for (String lab : KNOWN) {
             state.put(lab, false);
-            Gauge.builder("ladebahn.lab.active", state,
-                          m -> Boolean.TRUE.equals(m.get(lab)) ? 1.0 : 0.0)
-                 .tag("lab", lab)
-                 .description("1 when the named fault-injection lab is enabled")
-                 .register(registry);
         }
         params.put(SLOW_RESPONSE, 250);
+
+        Meter meter = GlobalOpenTelemetry.getMeter("ladebahn.labs");
+        meter.gaugeBuilder("ladebahn.lab.active")
+             .setDescription("1 when the named fault-injection lab is enabled")
+             .buildWithCallback(measurement -> {
+                 for (String lab : KNOWN) {
+                     measurement.record(on(lab) ? 1.0 : 0.0,
+                                        Attributes.of(LAB_KEY, lab));
+                 }
+             });
     }
 
     public boolean on(String lab) {

@@ -1,3 +1,42 @@
+spring:
+  application:
+    name: ladebahn
+  datasource:
+    url: jdbc:postgresql://localhost:5432/ladebahn
+    username: ladebahn
+    password: ladebahn
+    hikari:
+      maximum-pool-size: 10
+      pool-name: ladebahn-pool
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    open-in-view: false
+    properties:
+      hibernate.jdbc.batch_size: 50
+  flyway:
+    enabled: true
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics,prometheus
+  endpoint:
+    health:
+      show-details: always
+  otlp:
+    metrics:
+      export:
+        url: ${OTEL_EXPORTER_OTLP_ENDPOINT}/v1/metrics
+        step: 15s
+        headers:
+          Authorization: ${OTLP_AUTH_HEADER}
+
 ladebahn:
   labs:
     token: ${LAB_TOKEN:local-dev-token}
+
+logging:
+  level:
+    io.micrometer.registry.otlp: DEBUG

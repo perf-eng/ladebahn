@@ -128,3 +128,22 @@ Method note: the first attempt at this measurement was invalid. The lab was left
 enabled, so both "native" and "naive" runs used the naive path, and the apparent
 improvement was JIT warm-up. Each path needs its own warm-up, and the flag state must
 be verified before each set.
+
+### Finding — the map exposed a seeder bug
+
+Rendering 50 Berlin sites on a map showed every marker stacked in a tight blob at
+the city centre rather than spread across the 5 km radius.
+
+Cause: the seeder uses `Math.abs(rnd.nextGaussian()) * 8.0` for the offset from a
+city centre. abs() of a Gaussian is a half-normal — heavily weighted toward zero —
+so most sites land within 1-2 km of the exact centre coordinate.
+
+Invisible in JSON, in EXPLAIN output, and in every timing taken so far. One glance
+at a map made it obvious.
+
+Why it matters beyond looks: GIST index performance depends on how points distribute
+across bounding boxes. A single dense heap is an unrealistically easy shape, so
+lab 02 (drop_index) is being measured against a friendlier distribution than reality.
+
+Takeaway: visualise your test data. Statistical checks confirm what you thought to
+check; a picture shows what you did not.

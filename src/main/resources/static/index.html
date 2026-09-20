@@ -1,0 +1,192 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ladebahn — charging station finder</title>
+<link href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css" rel="stylesheet">
+<script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+<style>
+  :root { --bg:#12141a; --panel:#1b1e26; --line:#2b3040; --text:#e6e8ee; --muted:#8b93a7;
+          --ok:#3ecf8e; --warn:#e0a458; --accent:#5b8def; }
+  * { box-sizing:border-box; }
+  body { margin:0; font:15px/1.45 -apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;
+         background:var(--bg); color:var(--text); height:100vh; display:flex; flex-direction:column; }
+  header { padding:12px 16px; border-bottom:1px solid var(--line); display:flex;
+           gap:12px; align-items:center; flex-wrap:wrap; }
+  h1 { font-size:16px; margin:0 12px 0 0; font-weight:600; letter-spacing:.3px; }
+  label { font-size:12px; color:var(--muted); margin-right:4px; }
+  input, select, button { background:var(--panel); color:var(--text); border:1px solid var(--line);
+                          border-radius:6px; padding:6px 9px; font-size:13px; }
+  button { cursor:pointer; border-color:var(--accent); }
+  button:hover { background:#232838; }
+  #stats { margin-left:auto; font-size:12px; color:var(--muted); }
+  main { flex:1; display:flex; min-height:0; }
+  #map { flex:1; }
+  #list { width:380px; border-left:1px solid var(--line); overflow-y:auto; background:var(--panel); }
+  .row { padding:10px 14px; border-bottom:1px solid var(--line); cursor:pointer; }
+  .row:hover { background:#232838; }
+  .row .nm { font-weight:600; font-size:13px; }
+  .row .sub { font-size:11px; color:var(--muted); margin-top:2px; }
+  .badge { display:inline-block; padding:1px 6px; border-radius:10px; font-size:11px; margin-top:4px; }
+  .free { background:rgba(62,207,142,.15); color:var(--ok); }
+  .busy { background:rgba(224,164,88,.15); color:var(--warn); }
+  dialog { background:var(--panel); color:var(--text); border:1px solid var(--line);
+           border-radius:10px; padding:20px; max-width:420px; }
+  dialog::backdrop { background:rgba(0,0,0,.6); }
+  dialog h2 { margin:0 0 10px; font-size:16px; }
+  dialog dl { display:grid; grid-template-columns:auto 1fr; gap:6px 14px; font-size:13px; margin:0; }
+  dialog dt { color:var(--muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>⚡ Ladebahn</h1>
+  <label for="city">City</label>
+  <select id="city">
+    <option value="52.5219,13.4132">Berlin</option>
+    <option value="53.5511,9.9937">Hamburg</option>
+    <option value="48.1351,11.5820">München</option>
+    <option value="50.1109,8.6821">Frankfurt</option>
+    <option value="51.3397,12.3731">Leipzig</option>
+  </select>
+  <label for="type">Connector</label>
+  <select id="type">
+    <option value="">Any</option>
+    <option value="TYPE2">Type 2</option>
+    <option value="CCS">CCS</option>
+    <option value="CHADEMO">CHAdeMO</option>
+  </select>
+  <label for="radius">Radius km</label>
+  <input id="radius" type="number" value="5" min="1" max="50" style="width:64px">
+  <label for="size">Results</label>
+  <input id="size" type="number" value="50" min="1" max="100" style="width:64px">
+  <button id="search">Search</button>
+  <button id="locate">Near me</button>
+  <span id="stats">—</span>
+</header>
+
+<main>
+  <div id="map"></div>
+  <div id="list"></div>
+</main>
+
+<dialog id="detail">
+  <h2 id="dTitle"></h2>
+  <dl id="dBody"></dl>
+  <div style="margin-top:16px;text-align:right">
+    <button onclick="document.getElementById('detail').close()">Close</button>
+  </div>
+</dialog>
+
+<script>
+const map = new maplibregl.Map({
+  container: 'map',
+  style: 'https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json',
+  center: [13.4132, 52.5219],
+  zoom: 11
+});
+map.addControl(new maplibregl.NavigationControl(), 'top-right');
+
+let markers = [];
+let current = [];
+
+function clearMarkers() {
+  markers.forEach(m => m.remove());
+  markers = [];
+}
+
+function render(data) {
+  clearMarkers();
+  current = data.sites || [];
+
+  const list = document.getElementById('list');
+  list.innerHTML = '';
+
+  current.forEach((s, i) => {
+    const free = s.availableConnectors > 0;
+    const colour = free ? '#3ecf8e' : '#e0a458';
+
+    const m = new maplibregl.Marker({ color: colour })
+      .setLngLat([s.lon, s.lat])
+      .addTo(map);
+    markers.push(m);
+    m.getElement().style.cursor = 'pointer';
+    m.getElement().addEventListener('click', () => openDetail(i));
+
+    const row = document.createElement('div');
+    row.className = 'row';
+    row.innerHTML =
+      '<div class="nm">' + esc(s.name) + '</div>' +
+      '<div class="sub">' + esc(s.operatorName) + ' · ' + s.distanceM + ' m · ' + s.maxKw + ' kW</div>' +
+      '<span class="badge ' + (free ? 'free' : 'busy') + '">' +
+        s.availableConnectors + ' of ' + s.totalConnectors + ' free</span>';
+    row.addEventListener('click', () => {
+      map.flyTo({ center: [s.lon, s.lat], zoom: 15 });
+      openDetail(i);
+    });
+    list.appendChild(row);
+  });
+
+  document.getElementById('stats').textContent =
+    data.count + ' sites · ' + data.queryTimeMs + ' ms · radius ' + data.radiusKm + ' km';
+}
+
+function openDetail(i) {
+  const s = current[i];
+  document.getElementById('dTitle').textContent = s.name;
+  document.getElementById('dBody').innerHTML =
+    '<dt>Operator</dt><dd>' + esc(s.operatorName) + '</dd>' +
+    '<dt>Address</dt><dd>' + esc(s.street || '—') + ', ' + esc(s.postcode || '') + ' ' + esc(s.city || '') + '</dd>' +
+    '<dt>Distance</dt><dd>' + s.distanceM + ' m</dd>' +
+    '<dt>Connectors</dt><dd>' + s.availableConnectors + ' available of ' + s.totalConnectors + '</dd>' +
+    '<dt>Max power</dt><dd>' + s.maxKw + ' kW</dd>' +
+    '<dt>Coordinates</dt><dd>' + s.lat.toFixed(4) + ', ' + s.lon.toFixed(4) + '</dd>';
+  document.getElementById('detail').showModal();
+}
+
+function esc(t) {
+  return String(t == null ? '' : t).replace(/[&<>"]/g,
+    c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;'}[c]));
+}
+
+async function search(lat, lon) {
+  const type   = document.getElementById('type').value;
+  const radius = document.getElementById('radius').value;
+  const size   = document.getElementById('size').value;
+
+  let url = '/api/v1/sites/nearby?lat=' + lat + '&lon=' + lon +
+            '&radiusKm=' + radius + '&size=' + size;
+  if (type) url += '&connectorType=' + type;
+
+  document.getElementById('stats').textContent = 'searching…';
+  try {
+    const res = await fetch(url);
+    if (!res.ok) throw new Error('HTTP ' + res.status);
+    const data = await res.json();
+    map.flyTo({ center: [lon, lat], zoom: 12 });
+    render(data);
+  } catch (e) {
+    document.getElementById('stats').textContent = 'error: ' + e.message;
+  }
+}
+
+function searchSelectedCity() {
+  const [lat, lon] = document.getElementById('city').value.split(',').map(Number);
+  search(lat, lon);
+}
+
+document.getElementById('search').addEventListener('click', searchSelectedCity);
+document.getElementById('city').addEventListener('change', searchSelectedCity);
+document.getElementById('locate').addEventListener('click', () => {
+  navigator.geolocation.getCurrentPosition(
+    p => search(p.coords.latitude, p.coords.longitude),
+    () => document.getElementById('stats').textContent = 'location denied'
+  );
+});
+
+searchSelectedCity();
+</script>
+</body>
+</html>

@@ -147,3 +147,21 @@ lab 02 (drop_index) is being measured against a friendlier distribution than rea
 
 Takeaway: visualise your test data. Statistical checks confirm what you thought to
 check; a picture shows what you did not.
+
+### Testcontainers — real PostGIS in tests
+
+Initializr's generated config used `postgres:latest`, which has no PostGIS — V1
+migration would fail on CREATE EXTENSION. Pointed it at the project's own image
+(`ladebahn/postgres:16-postgis`) with `.asCompatibleSubstituteFor("postgres")`, so
+tests run against byte-identical Postgres to dev and prod.
+
+Five tests cover what the type system can't: spatial ordering, radius correctness,
+pagination without overlap, filter narrowing, connector count sanity. H2 would have
+passed none of these honestly — no PostGIS, no ST_DWithin, no GIST, different planner.
+
+`withReuse(true)` plus `testcontainers.reuse.enable=true` in ~/.testcontainers.properties
+keeps the container alive between runs: 5 tests in 0.193 s. Without reuse each run
+pays container startup.
+
+Gotcha: Initializr generates TestcontainersConfiguration as package-private, so tests
+in sub-packages can't @Import it. Needs `public`.

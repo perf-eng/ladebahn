@@ -1,0 +1,4 @@
+sh.easyhostit.com {
+    encode gzip
+    reverse_proxy app:8080
+}

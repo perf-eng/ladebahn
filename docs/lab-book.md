@@ -70,3 +70,36 @@ rate() needs >=2 samples in its window. Rule: rate window >= 4x export interval.
 
 Takeaway: verify each step produced what it claimed before building on it.
 A green k6 summary measuring 404s is worse than a red one.
+
+### Incident — credentials committed to a public repo
+
+`otel/env.sh` containing the Grafana Cloud OTLP token was pushed to a public repo.
+
+Root cause: the `.gitignore` entry was added *after* the file had already been staged.
+Git only ignores untracked files — once a file is tracked, `.gitignore` has no effect
+on it. Adding the rule later appears to work (the file stops showing as modified) while
+the file remains fully tracked and published.
+
+Response: rotated the token, rewrote history, force-pushed.
+
+Rule going forward: a secret goes in a path that was .gitignore'd BEFORE the file
+was ever created. Verify with `git check-ignore -v <path>` — it must print a matching
+rule, not nothing.
+
+### Finding — OTLP auth: "no credentials" vs "invalid credentials"
+
+Grafana Cloud's newer connection-details page issues a bare token with no header
+name. OTEL_EXPORTER_OTLP_HEADERS expects name=value pairs, so a bare token means
+the agent sends no Authorization header at all.
+
+The two 401 bodies are diagnostically distinct and worth knowing:
+- "no credentials provided"      -> header absent or malformed (not name=value)
+- "invalid authentication ..."   -> header well-formed, contents wrong
+
+Fix: Authorization=Basic $(echo -n "INSTANCE_ID:TOKEN" | base64). The -n matters;
+a trailing newline gets encoded and is rejected.
+
+Contrast with earlier tonight: four silent no-ops cost ~30 min each. This one
+announced the exact endpoint, status and reason every five seconds, and the
+error *text* narrowed it from "auth is broken" to "the header isn't being sent".
+That distinction is the whole argument for good error messages.

@@ -1,0 +1,3 @@
+ladebahn:
+  labs:
+    token: ${LAB_TOKEN:local-dev-token}

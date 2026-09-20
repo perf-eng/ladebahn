@@ -103,3 +103,28 @@ Contrast with earlier tonight: four silent no-ops cost ~30 min each. This one
 announced the exact endpoint, status and reason every five seconds, and the
 error *text* narrowed it from "auth is broken" to "the header isn't being sent".
 That distinction is the whole argument for good error messages.
+
+### Lab 01 — n_plus_one
+
+Native path: one SQL query with joins and aggregates.
+Naive path: one query for sites, then lazy-loaded chargePoints, connectors and
+operator per site. Same endpoint, same response, switched by the lab flag.
+
+| Page | native | naive | ratio |
+|---|---|---|---|
+| size=20, Alexanderplatz | ~0.012 s | ~0.019 s | 1.6x |
+| size=100, hub-dense origin (52.5136, 13.4001) | ~0.012 s | ~0.068 s | **5.7x** |
+
+The native path cost the SAME at size=20 and size=100. The naive path scales with
+both row count and fan-out, because each extra site means more round trips.
+
+Surprise: the severity of the identical bug varied 3.5x depending only on which rows
+the page contained. Berlin's nearest 20 sites are mostly 2-charge-point sites; widen
+to 100 near a 40-point hub and the round trips multiply. In production this shows up
+as a p99 problem, not a p50 one — anyone measuring with one fixed request would call
+it minor.
+
+Method note: the first attempt at this measurement was invalid. The lab was left
+enabled, so both "native" and "naive" runs used the naive path, and the apparent
+improvement was JIT warm-up. Each path needs its own warm-up, and the flag state must
+be verified before each set.

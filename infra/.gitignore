@@ -1,0 +1,21 @@
+# Terraform — never publish these (public repo)
+
+# Downloaded provider plugins; re-downloadable
+.terraform/
+
+# State: Terraform's record of what it built; can contain secrets
+*.tfstate
+*.tfstate.*
+
+# Personal variable values; may contain tokens
+*.tfvars
+*.tfvars.json
+
+# Saved plans; can contain secrets
+*.tfplan
+
+# Crash logs
+crash.log
+crash.*.log
+
+# NOTE: .terraform.lock.hcl is deliberately NOT ignored — commit it

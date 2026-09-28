@@ -13,14 +13,14 @@ terraform {
   }
 }
 
-# Something Terraform creates and must remember: a random two-word name
+# Something Terraform creates and must remember: a random name
 resource "random_pet" "station" {
-  length    = 2
+  length    = var.name_words
   separator = "-"
 }
 
 # A real object on disk that depends on the name above
 resource "local_file" "hello" {
   filename = "${path.module}/hello.txt"
-  content  = "Ladebahn playground: station ${random_pet.station.id}\n"
+  content  = local.greeting
 }

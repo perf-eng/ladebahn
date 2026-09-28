@@ -165,3 +165,80 @@ pays container startup.
 
 Gotcha: Initializr generates TestcontainersConfiguration as package-private, so tests
 in sub-packages can't @Import it. Needs `public`.
+
+### 2026-09-28 — Stage 2: Terraform takes over the local database and Grafana
+
+Three Terraform configurations, all run from the Mac (`infra/`): a playground for the
+fundamentals, Ladebahn's own PostGIS database (Docker provider 4.6.0), and the Grafana
+folder, dashboards and alert rules (Grafana provider 4.46.0). Every step was run by a
+walkthrough script with checks: 27 + 53 + 35 passed.
+
+**Twin check.** The Terraform database (5433) against the compose database (5432), both
+seeded large / seed 42: identical row counts (50 / 20,000 / 91,314 / 141,565), a
+byte-identical nearby-search response, and the same PG 16.15 · PostGIS 3.6.4.
+
+### Finding — same Dockerfile, different image ID, identical content
+
+Terraform built the Postgres image from the same Dockerfile in 1 second (Docker's build
+cache), yet it got a different image ID from the compose-built one
+(`7c93932b…` vs `ffbb5016…`). The filesystem layers were identical (same RootFS
+digest list) and so was the creation timestamp. The only difference was compose's labels
+(`com.docker.compose.project`, `.service`, `.version`).
+
+An image ID fingerprints the layers *and* the metadata. To ask "is this the same
+Postgres?", compare layers or versions, not IDs.
+
+Side note: the image is only identical because of the cache. `apt-get install
+postgresql-16-postgis-3` is unpinned, so a build without cache could pull a newer PostGIS.
+
+### Finding — `docker stop` turns into a full container rebuild
+
+After `docker stop ladebahn-tf-db`, the plan wanted to **replace** the container rather
+than start it. `must_run` read back as false, and the `ports` block was marked
+`# forces replacement`, because a stopped container reports no published ports.
+Planning itself changed nothing (still `Exited` after the plan). Apply rebuilt the
+container, and all rows survived because the data lives in the volume.
+
+Drift repair is whatever the provider can express. Here, it can only rebuild.
+
+### Finding — tuning a knob rebuilds the container, never the data
+
+`-var work_mem=32MB`: `command` forces replacement of the container (Postgres reads its
+flags only at startup). The volume never appeared in the plan. 8 s, rows intact, `show
+work_mem` = 32MB, and back to 16MB in 9 s. `prevent_destroy` on the volume refused
+`terraform destroy` before anything was touched.
+
+### Finding — the dashboard that was never saved
+
+Before importing "the Session 5 self-narrating dashboard", the stack was listed through
+the API: no Ladebahn dashboard existed. The panel had been built but never saved.
+The dashboard was rewritten as a template (`infra/grafana/dashboards/ladebahn.json.tftpl`),
+created once outside Terraform, then adopted with an `import` block and
+`-generate-config-out`. After adoption the plan said No changes. Then: template file (only the
+folder move showed in the plan), and `for_each` for `local` and `server`, with a `moved`
+block so the adopted dashboard wasn't rebuilt. Deleting it in the UI and running one
+apply restored it (1 s).
+
+Takeaway: look before you import. "It exists" was a memory, not a fact.
+
+### Finding — the alert is right, the p95 number is not
+
+Alert: p95 of `/api/v1/sites/nearby` (5-min window) > 0.2 s for 1 min. Proven with lab 03
+(slow_response, +250 ms) via `k6/lab-demo.js`: lab on at 120 s, **Pending at 224 s,
+Firing at 285 s**.
+
+| | p95 |
+|---|---|
+| k6, client side (all requests, incl. baseline) | 0.282 s |
+| Prometheus `histogram_quantile(0.95, …)` during the lab | 0.470–0.479 s |
+
+The slow requests took about 0.28 s, but Prometheus reported about 0.47 s. OTel's default
+duration buckets are `… 0.1, 0.25, 0.5, 0.75 …`. When most requests fall in one bucket,
+`histogram_quantile` interpolates linearly inside it: 0.25 + 0.95 × (0.5 − 0.25) = **0.4875**.
+
+That is exactly Stage 1's "p95 0.4875 s @ 400 ms". The Stage 1 conclusion that the stack
+adds ~20% overhead above the artificial delay was a bucket artefact, not overhead.
+When nearly every request lands in the 0.25–0.5 s bucket, any true p95 in that range reads as ~0.47–0.49 s.
+
+Takeaway: percentiles from a histogram have the histogram's resolution. Cross-check with
+k6's client-side numbers, and don't quote a server-side p95 finer than its bucket width.

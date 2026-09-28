@@ -1,0 +1,132 @@
+{
+  "uid": "ladebahn-${environment}",
+  "title": "Ladebahn — ${environment}",
+  "description": "Self-narrating dashboard: nearby-search latency with the lab switches overlaid. Managed by Terraform (infra/grafana). Edits made in the UI are undone by the next apply.",
+  "tags": ["ladebahn", "terraform", "${environment}"],
+  "timezone": "browser",
+  "schemaVersion": 39,
+  "editable": true,
+  "refresh": "30s",
+  "time": { "from": "now-30m", "to": "now" },
+  "panels": [
+    {
+      "id": 1,
+      "type": "timeseries",
+      "title": "Nearby search p95 — with the lab switches overlaid",
+      "description": "Left axis: p95 latency of /api/v1/sites/nearby over a 5-minute window. Right axis: each lab switch, 1 = on. When a switch goes on and the line climbs, the graph explains itself.",
+      "gridPos": { "h": 11, "w": 24, "x": 0, "y": 0 },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{deployment_environment=\"${environment}\", http_route=\"/api/v1/sites/nearby\"}[5m])))",
+          "legendFormat": "p95 latency"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" },
+          "expr": "max by (lab) (ladebahn_lab_active{deployment_environment=\"${environment}\"})",
+          "legendFormat": "lab: {{lab}}"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "s",
+          "custom": { "lineWidth": 2, "fillOpacity": 0, "axisLabel": "p95 latency" }
+        },
+        "overrides": [
+          {
+            "matcher": { "id": "byFrameRefID", "options": "B" },
+            "properties": [
+              { "id": "unit", "value": "none" },
+              { "id": "min", "value": 0 },
+              { "id": "max", "value": 1 },
+              { "id": "custom.axisPlacement", "value": "right" },
+              { "id": "custom.axisLabel", "value": "lab switch (1 = on)" },
+              { "id": "custom.lineInterpolation", "value": "stepAfter" },
+              { "id": "custom.fillOpacity", "value": 15 }
+            ]
+          }
+        ]
+      },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      }
+    },
+    {
+      "id": 2,
+      "type": "timeseries",
+      "title": "Nearby search p50 / p95 / p99",
+      "gridPos": { "h": 9, "w": 12, "x": 0, "y": 11 },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" },
+          "expr": "histogram_quantile(0.50, sum by (le) (rate(http_server_request_duration_seconds_bucket{deployment_environment=\"${environment}\", http_route=\"/api/v1/sites/nearby\"}[5m])))",
+          "legendFormat": "p50"
+        },
+        {
+          "refId": "B",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" },
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(http_server_request_duration_seconds_bucket{deployment_environment=\"${environment}\", http_route=\"/api/v1/sites/nearby\"}[5m])))",
+          "legendFormat": "p95"
+        },
+        {
+          "refId": "C",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" },
+          "expr": "histogram_quantile(0.99, sum by (le) (rate(http_server_request_duration_seconds_bucket{deployment_environment=\"${environment}\", http_route=\"/api/v1/sites/nearby\"}[5m])))",
+          "legendFormat": "p99"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "s", "custom": { "lineWidth": 1, "fillOpacity": 0 } }, "overrides": [] },
+      "options": {
+        "legend": { "displayMode": "list", "placement": "bottom" },
+        "tooltip": { "mode": "multi", "sort": "none" }
+      }
+    },
+    {
+      "id": 3,
+      "type": "stat",
+      "title": "Nearby search throughput",
+      "gridPos": { "h": 9, "w": 6, "x": 12, "y": 11 },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" },
+          "expr": "sum(rate(http_server_request_duration_seconds_count{deployment_environment=\"${environment}\", http_route=\"/api/v1/sites/nearby\"}[5m]))",
+          "legendFormat": "requests/s"
+        }
+      ],
+      "fieldConfig": { "defaults": { "unit": "reqps", "decimals": 1 }, "overrides": [] },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "graphMode": "area", "colorMode": "none" }
+    },
+    {
+      "id": 4,
+      "type": "stat",
+      "title": "Server errors (5xx share, all routes)",
+      "gridPos": { "h": 9, "w": 6, "x": 18, "y": 11 },
+      "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" },
+      "targets": [
+        {
+          "refId": "A",
+          "datasource": { "type": "prometheus", "uid": "grafanacloud-prom" },
+          "expr": "sum(rate(http_server_request_duration_seconds_count{deployment_environment=\"${environment}\", http_response_status_code=~\"5..\"}[5m])) / sum(rate(http_server_request_duration_seconds_count{deployment_environment=\"${environment}\"}[5m])) or vector(0)",
+          "legendFormat": "5xx share"
+        }
+      ],
+      "fieldConfig": {
+        "defaults": {
+          "unit": "percentunit",
+          "decimals": 1,
+          "thresholds": { "mode": "absolute", "steps": [ { "color": "green", "value": null }, { "color": "red", "value": 0.01 } ] }
+        },
+        "overrides": []
+      },
+      "options": { "reduceOptions": { "calcs": ["lastNotNull"], "fields": "", "values": false }, "graphMode": "none", "colorMode": "value" }
+    }
+  ]
+}

@@ -1,0 +1,121 @@
+# Lab switch — flip a performance fault on or off on the public demo server,
+# from the Actions page (works from a phone). Use it on its own, or while the
+# "Load test (k6)" action is running, to watch the dashboard react.
+name: Lab switch
+
+run-name: "Lab switch · ${{ inputs.lab }} → ${{ inputs.action }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "on = break it, off = heal it, status = just show the switches"
+        type: choice
+        options: [status, "on", "off"]
+        default: status
+      lab:
+        description: "Which switch (all = every lab; only for off/status)"
+        type: choice
+        options: [slow_response, n_plus_one, drop_index, all]
+        default: slow_response
+      param:
+        description: "Optional lab setting, e.g. extra delay in ms for slow_response (empty = keep the current one)"
+        type: string
+        default: ""
+
+permissions:
+  contents: read
+
+# Two flips never race each other
+concurrency:
+  group: lab-switch
+  cancel-in-progress: false
+
+env:
+  DEMO_URL: ${{ vars.DEMO_URL || 'https://sh.easyhostit.com' }}
+
+jobs:
+  switch:
+    name: "${{ inputs.lab }} → ${{ inputs.action }}"
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check the request
+        env:
+          ACTION: ${{ inputs.action }}
+          LAB: ${{ inputs.lab }}
+          PARAM: ${{ inputs.param }}
+          HAS_TOKEN: ${{ secrets.DEMO_LAB_TOKEN != '' }}
+        run: |
+          if [ "$ACTION" = "on" ] && [ "$LAB" = "all" ]; then
+            echo "::error::Switch one lab on at a time, so the dashboard shows a single cause."
+            exit 1
+          fi
+          if [ -n "$PARAM" ] && ! [[ "$PARAM" =~ ^[0-9]{1,5}$ ]]; then
+            echo "::error::param must be a whole number (e.g. 250), got '$PARAM'"
+            exit 1
+          fi
+          if [ "$ACTION" != "status" ] && [ "$HAS_TOKEN" != "true" ]; then
+            echo "::error::The repository secret DEMO_LAB_TOKEN is not set (see README → One-time setup)."
+            exit 1
+          fi
+
+      - name: Is the demo server up?
+        run: |
+          if ! curl -fsS --max-time 15 "$DEMO_URL/actuator/health" >/dev/null; then
+            echo "::error::$DEMO_URL is not answering. Start the stack on the server first (README → Demo server)."
+            exit 1
+          fi
+
+      - name: Flip the switch
+        if: inputs.action != 'status'
+        env:
+          ACTION: ${{ inputs.action }}
+          LAB: ${{ inputs.lab }}
+          PARAM: ${{ inputs.param }}
+          TOKEN: ${{ secrets.DEMO_LAB_TOKEN }}
+        run: |
+          if [ "$LAB" = "all" ]; then
+            labs=$(curl -fsS "$DEMO_URL/labs" | jq -r '.labs | keys[]')
+          else
+            labs="$LAB"
+          fi
+          for lab in $labs; do
+            if [ "$ACTION" = "on" ]; then
+              url="$DEMO_URL/labs/$lab/enable"
+              [ -n "$PARAM" ] && url="$url?param=$PARAM"
+            else
+              url="$DEMO_URL/labs/$lab/disable"
+            fi
+            code=$(curl -sS -o /tmp/response.json -w '%{http_code}' -X POST -H "X-Lab-Token: $TOKEN" "$url")
+            echo "$lab → $ACTION: HTTP $code"
+            if [ "$code" != "200" ]; then
+              cat /tmp/response.json; echo
+              echo "::error::The server refused to switch $lab $ACTION (HTTP $code)."
+              exit 1
+            fi
+          done
+
+      - name: Show every switch
+        env:
+          ACTION: ${{ inputs.action }}
+          LAB: ${{ inputs.lab }}
+          GRAFANA_URL: ${{ vars.GRAFANA_URL }}
+        run: |
+          state=$(curl -fsS "$DEMO_URL/labs")
+          echo "$state" | jq .
+          {
+            echo "### Lab switches on the demo server"
+            echo
+            if [ "$ACTION" != "status" ]; then echo "Requested: **$LAB → $ACTION**"; echo; fi
+            echo "| Lab | State | Setting |"
+            echo "|---|---|---|"
+            echo "$state" | jq -r '.labs | to_entries[] | "\(.key)|\(.value)"' | sort | while IFS='|' read -r lab on; do
+              param=$(echo "$state" | jq -r --arg l "$lab" '.params[$l] // "–"')
+              if [ "$on" = "true" ]; then badge="🔴 on"; else badge="🟢 off"; fi
+              echo "| \`$lab\` | $badge | $param |"
+            done
+            echo
+            echo "Watch it: Grafana → Dashboards → Ladebahn → **Ladebahn — server**"
+            if [ -n "$GRAFANA_URL" ]; then echo "($GRAFANA_URL/d/ladebahn-server)"; fi
+          } >> "$GITHUB_STEP_SUMMARY"

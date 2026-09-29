@@ -1,4 +1,13 @@
 sh.easyhostit.com {
     encode gzip
-    reverse_proxy app:8080
+
+    # Accessibility scanner (runs on the host; settings in /etc/a11y-scanner.env)
+    handle /a11y* {
+        reverse_proxy 172.17.0.1:3100
+    }
+
+    # Ladebahn: everything else
+    handle {
+        reverse_proxy app:8080
+    }
 }

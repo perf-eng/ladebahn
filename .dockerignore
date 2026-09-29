@@ -1,0 +1,16 @@
+# Only gradlew, gradle/, settings.gradle, build.gradle and src/ go into the image.
+# Everything else stays out of the build context — above all, secrets.
+.git
+.github
+.gradle
+build
+infra
+k6
+docs
+deploy
+otel
+entity
+*.md
+.env
+.env.*
+**/*.log

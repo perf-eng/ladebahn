@@ -1,0 +1,197 @@
+# Deploy — build the app image on GitHub and roll it out to the public demo server.
+#
+#   1. build  : the image for the chosen commit is built here (linux/amd64, like the
+#               server) and published to ghcr.io/perf-eng/ladebahn:<commit>. Already
+#               built? Then it is reused, so a rollback takes seconds.
+#   2. deploy : GitHub logs into the server with a key that can only run
+#               deploy/remote-deploy.sh. That script swaps the app container to the
+#               new image. The database and Caddy (TLS) are never touched.
+#   3. check  : the public URL must answer healthy and return search results.
+#
+# Roll back = run it again with the previous commit (shown on every run's page).
+name: Deploy to demo server
+
+run-name: "Deploy ${{ inputs.ref }} → demo server"
+
+on:
+  workflow_dispatch:
+    inputs:
+      ref:
+        description: "Branch, tag or commit to deploy"
+        type: string
+        default: main
+      reseed:
+        description: "Reseed the demo data afterwards (seed 42)"
+        type: choice
+        options: [none, small, medium]
+        default: none
+
+permissions:
+  contents: read
+
+# Never two deploys at once
+concurrency:
+  group: deploy-demo-server
+  cancel-in-progress: false
+
+env:
+  DEMO_URL: ${{ vars.DEMO_URL || 'https://sh.easyhostit.com' }}
+
+jobs:
+  build:
+    name: Build the image
+    runs-on: ubuntu-latest   # x86_64, the same architecture as the server
+    timeout-minutes: 30
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      sha: ${{ steps.meta.outputs.sha }}
+      image: ${{ steps.meta.outputs.image }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ inputs.ref }}
+
+      - id: meta
+        name: Work out the image name
+        run: |
+          sha=$(git rev-parse HEAD)
+          owner=${GITHUB_REPOSITORY_OWNER,,}
+          echo "sha=$sha" >> "$GITHUB_OUTPUT"
+          echo "image=ghcr.io/$owner/ladebahn:$sha" >> "$GITHUB_OUTPUT"
+          echo "Deploying commit $sha ($(git log -1 --format=%s))"
+
+      - uses: docker/login-action@v4
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - id: exists
+        name: Already built?
+        env:
+          IMAGE: ${{ steps.meta.outputs.image }}
+        run: |
+          if docker buildx imagetools inspect "$IMAGE" >/dev/null 2>&1; then
+            echo "built=true" >> "$GITHUB_OUTPUT"; echo "$IMAGE exists — reusing it"
+          else
+            echo "built=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: docker/setup-buildx-action@v4
+        if: steps.exists.outputs.built != 'true'
+
+      - name: Build and publish
+        if: steps.exists.outputs.built != 'true'
+        uses: docker/build-push-action@v7
+        with:
+          context: .
+          file: Dockerfile
+          platforms: linux/amd64
+          push: true
+          tags: ${{ steps.meta.outputs.image }}
+          labels: |
+            org.opencontainers.image.source=${{ github.server_url }}/${{ github.repository }}
+            org.opencontainers.image.revision=${{ steps.meta.outputs.sha }}
+            org.opencontainers.image.title=ladebahn
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  deploy:
+    name: Roll out and check
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    environment:
+      name: demo-server
+      url: ${{ vars.DEMO_URL || 'https://sh.easyhostit.com' }}
+    steps:
+      - name: Check the deploy secrets are set
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          USER_: ${{ secrets.DEPLOY_USER }}
+        run: |
+          missing=""
+          [ -n "$KEY" ] || missing="$missing DEPLOY_SSH_KEY"
+          [ -n "$KNOWN" ] || missing="$missing DEPLOY_KNOWN_HOSTS"
+          [ -n "$HOST" ] || missing="$missing DEPLOY_HOST"
+          [ -n "$USER_" ] || missing="$missing DEPLOY_USER"
+          if [ -n "$missing" ]; then
+            echo "::error::Missing secrets in the demo-server environment:$missing (README → One-time setup)."
+            exit 1
+          fi
+
+      - name: Log into the server with the deploy-only key
+        env:
+          KEY: ${{ secrets.DEPLOY_SSH_KEY }}
+          KNOWN: ${{ secrets.DEPLOY_KNOWN_HOSTS }}
+        run: |
+          install -m 700 -d ~/.ssh
+          printf '%s\n' "$KEY" > ~/.ssh/deploy_key && chmod 600 ~/.ssh/deploy_key
+          printf '%s\n' "$KNOWN" > ~/.ssh/known_hosts && chmod 644 ~/.ssh/known_hosts
+
+      - name: Switch the app to the new image
+        id: rollout
+        env:
+          HOST: ${{ secrets.DEPLOY_HOST }}
+          PORT: ${{ secrets.DEPLOY_PORT || '22' }}
+          USER_: ${{ secrets.DEPLOY_USER }}
+          SHA: ${{ needs.build.outputs.sha }}
+        run: |
+          ssh -i ~/.ssh/deploy_key -p "$PORT" -o BatchMode=yes -o StrictHostKeyChecking=yes \
+            "$USER_@$HOST" "deploy $SHA" | tee rollout.log
+          previous=$(sed -n 's/^previous=//p' rollout.log)
+          echo "previous=$previous" >> "$GITHUB_OUTPUT"
+
+      - name: Is the public site healthy?
+        run: |
+          for i in $(seq 1 36); do
+            if curl -fsS --max-time 10 "$DEMO_URL/actuator/health" | grep -q '"UP"'; then
+              echo "healthy after ~$(( i * 5 ))s"; break
+            fi
+            [ "$i" = 36 ] && { echo "::error::$DEMO_URL did not report UP within 3 minutes"; exit 1; }
+            sleep 5
+          done
+          count=$(curl -fsS --max-time 20 "$DEMO_URL/api/v1/sites/nearby?lat=52.5219&lon=13.4132&radiusKm=5&size=20" | jq '.count')
+          echo "nearby search returned $count sites"
+          [ "${count:-0}" -gt 0 ] || { echo "::error::nearby search returned no sites"; exit 1; }
+
+      - name: Reseed the demo data
+        if: inputs.reseed != 'none'
+        env:
+          SCALE: ${{ inputs.reseed }}
+          TOKEN: ${{ secrets.DEMO_LAB_TOKEN }}
+        run: |
+          curl -fsS --max-time 120 -X POST -H "X-Lab-Token: $TOKEN" "$DEMO_URL/admin/seed?scale=$SCALE&randomSeed=42"
+          echo
+
+      - name: Results page
+        if: always()
+        env:
+          SHA: ${{ needs.build.outputs.sha }}
+          IMAGE: ${{ needs.build.outputs.image }}
+          PREVIOUS: ${{ steps.rollout.outputs.previous }}
+          REF: ${{ inputs.ref }}
+          RESEED: ${{ inputs.reseed }}
+          STATUS: ${{ job.status }}
+        run: |
+          prev_sha="${PREVIOUS##*:}"
+          {
+            echo "### Deploy → demo server: $STATUS"
+            echo
+            echo "| | |"
+            echo "|---|---|"
+            echo "| Requested | \`$REF\` |"
+            echo "| Commit | [\`${SHA::7}\`]($GITHUB_SERVER_URL/$GITHUB_REPOSITORY/commit/$SHA) |"
+            echo "| Image | \`$IMAGE\` |"
+            echo "| Site | $DEMO_URL |"
+            echo "| Reseed | $RESEED |"
+            if [ -n "$PREVIOUS" ] && [ "$PREVIOUS" != none ]; then
+              echo "| Previous | \`$PREVIOUS\` |"
+              echo
+              echo "**Roll back:** run *Deploy to demo server* again with ref \`$prev_sha\`."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

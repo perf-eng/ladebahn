@@ -1,0 +1,289 @@
+# Load test (k6) — send simulated users at Ladebahn and, optionally, flip a lab
+# switch part-way through so the dashboard shows cause and effect.
+#
+#   target: server → the public demo on the friend's VM. Hard-capped at 5 users,
+#                    and only one load run at a time, so 5 is the total.
+#           ci     → a throwaway copy of the whole stack (PostGIS + app) inside this
+#                    GitHub machine. Heavier load is fine here; it is thrown away after.
+name: Load test (k6)
+
+run-name: "Load · ${{ inputs.target }} · ${{ inputs.vus }} users · ${{ inputs.duration }} · lab: ${{ inputs.lab }}"
+
+on:
+  workflow_dispatch:
+    inputs:
+      target:
+        description: "server = public demo (max 5 users) · ci = throwaway stack inside GitHub"
+        type: choice
+        options: [server, ci]
+        default: server
+      vus:
+        description: "Virtual users (server: capped at 5 · ci: up to 200)"
+        type: number
+        default: 5
+      duration:
+        description: "How long, e.g. 90s or 5m (server: up to 15m · ci: up to 30m)"
+        type: string
+        default: 5m
+      lab:
+        description: "Lab switch to flip during the run"
+        type: choice
+        options: [none, slow_response, n_plus_one, drop_index]
+        default: none
+      lab_param:
+        description: "Lab setting, e.g. extra delay in ms for slow_response (empty = app default, 250)"
+        type: string
+        default: ""
+      switch_on_at:
+        description: "Switch goes ON at, e.g. 2m (from the start of the run)"
+        type: string
+        default: 2m
+      switch_off_at:
+        description: "Switch goes OFF at, e.g. 4m"
+        type: string
+        default: 4m
+
+permissions:
+  contents: read
+
+# The demo server gets one load run at a time, so the 5-user cap is the total.
+# Throwaway-stack runs don't share anything and can run side by side.
+concurrency:
+  group: ${{ inputs.target == 'server' && 'load-demo-server' || format('load-ci-{0}', github.run_id) }}
+  cancel-in-progress: false
+
+env:
+  DEMO_URL: ${{ vars.DEMO_URL || 'https://sh.easyhostit.com' }}
+  K6_VERSION: "2.2.0"
+  SERVER_MAX_VUS: "5"
+
+jobs:
+  settings:
+    name: Check the settings
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    outputs:
+      vus: ${{ steps.check.outputs.vus }}
+      duration: ${{ steps.check.outputs.duration }}
+    steps:
+      - id: check
+        env:
+          TARGET: ${{ inputs.target }}
+          VUS: ${{ inputs.vus }}
+          DURATION: ${{ inputs.duration }}
+          LAB: ${{ inputs.lab }}
+          PARAM: ${{ inputs.lab_param }}
+          ON: ${{ inputs.switch_on_at }}
+          OFF: ${{ inputs.switch_off_at }}
+        run: |
+          fail() { echo "::error::$1"; exit 1; }
+          secs() { # 90s / 5m -> seconds; returns 1 for anything else
+            [[ "$1" =~ ^([0-9]+)(s|m)$ ]] || return 1
+            if [ "${BASH_REMATCH[2]}" = m ]; then echo $(( BASH_REMATCH[1] * 60 )); else echo "${BASH_REMATCH[1]}"; fi
+          }
+          [[ "$VUS" =~ ^[0-9]+$ ]] && [ "$VUS" -ge 1 ] || fail "vus must be a whole number of at least 1"
+          dur=$(secs "$DURATION") || fail "duration '$DURATION' is not valid — use e.g. 90s or 5m"
+          note=""
+          if [ "$TARGET" = server ]; then
+            if [ "$VUS" -gt "$SERVER_MAX_VUS" ]; then
+              note="Asked for $VUS users; the demo server is shared, so this run uses $SERVER_MAX_VUS."
+              echo "::warning::$note"
+              VUS=$SERVER_MAX_VUS
+            fi
+            [ "$dur" -le 900 ] || fail "the demo server takes at most 15m of load per run"
+          else
+            [ "$VUS" -le 200 ] || fail "the throwaway stack takes at most 200 users"
+            [ "$dur" -le 1800 ] || fail "the throwaway stack runs at most 30m"
+          fi
+          if [ "$LAB" != none ]; then
+            on=$(secs "$ON") || fail "switch_on_at '$ON' is not valid — use e.g. 2m"
+            off=$(secs "$OFF") || fail "switch_off_at '$OFF' is not valid — use e.g. 4m"
+            [ "$on" -lt "$off" ] && [ "$off" -le "$dur" ] \
+              || fail "switch times must be on < off <= duration (on $ON, off $OFF, duration $DURATION)"
+          fi
+          if [ -n "$PARAM" ] && ! [[ "$PARAM" =~ ^[0-9]{1,5}$ ]]; then
+            fail "lab_param must be a whole number (e.g. 250), got '$PARAM'"
+          fi
+          echo "vus=$VUS" >> "$GITHUB_OUTPUT"
+          echo "duration=$DURATION" >> "$GITHUB_OUTPUT"
+          {
+            echo "### Run settings"
+            echo
+            echo "| Setting | Value |"
+            echo "|---|---|"
+            echo "| Target | \`$TARGET\` |"
+            echo "| Virtual users | $VUS |"
+            echo "| Duration | $DURATION |"
+            if [ "$LAB" = none ]; then
+              echo "| Lab switch | none |"
+            else
+              echo "| Lab switch | \`$LAB\`${PARAM:+ (param $PARAM)} on at $ON, off at $OFF |"
+            fi
+            if [ -n "$note" ]; then echo; echo "> ⚠️ $note"; fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  # ---------------------------------------------------------------------------
+  server:
+    name: "Load → demo server (${{ needs.settings.outputs.vus }} users)"
+    needs: settings
+    if: inputs.target == 'server'
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: grafana/setup-k6-action@v1
+        with:
+          k6-version: ${{ env.K6_VERSION }}
+
+      - name: Is the demo server up?
+        env:
+          NEEDS_TOKEN: ${{ inputs.lab != 'none' }}
+          HAS_TOKEN: ${{ secrets.DEMO_LAB_TOKEN != '' }}
+        run: |
+          if ! curl -fsS --max-time 15 "$DEMO_URL/actuator/health" >/dev/null; then
+            echo "::error::$DEMO_URL is not answering. Start the stack on the server first (README → Demo server)."
+            exit 1
+          fi
+          if [ "$NEEDS_TOKEN" = true ] && [ "$HAS_TOKEN" != true ]; then
+            echo "::error::Flipping a lab needs the repository secret DEMO_LAB_TOKEN (README → One-time setup)."
+            exit 1
+          fi
+
+      - name: Run k6
+        id: k6
+        env:
+          BASE_URL: ${{ env.DEMO_URL }}
+          TARGET: server
+          VUS: ${{ needs.settings.outputs.vus }}
+          DURATION: ${{ needs.settings.outputs.duration }}
+          LAB: ${{ inputs.lab }}
+          LAB_PARAM: ${{ inputs.lab_param }}
+          SWITCH_ON_AT: ${{ inputs.switch_on_at }}
+          SWITCH_OFF_AT: ${{ inputs.switch_off_at }}
+          LAB_TOKEN: ${{ secrets.DEMO_LAB_TOKEN }}
+        run: |
+          echo "start_ms=$(date +%s%3N)" >> "$GITHUB_OUTPUT"
+          k6 run k6/lab-run.js
+
+      - name: Switch the lab off (always — even after a failure or a cancel)
+        if: always() && inputs.lab != 'none'
+        env:
+          LAB: ${{ inputs.lab }}
+          TOKEN: ${{ secrets.DEMO_LAB_TOKEN }}
+        run: |
+          curl -fsS -X POST -H "X-Lab-Token: $TOKEN" "$DEMO_URL/labs/$LAB/disable" && echo
+          curl -fsS "$DEMO_URL/labs" && echo
+
+      - name: Results page
+        if: always()
+        env:
+          START_MS: ${{ steps.k6.outputs.start_ms }}
+          GRAFANA_URL: ${{ vars.GRAFANA_URL }}
+        run: bash .github/scripts/load-summary.sh server
+
+      - name: Keep the raw k6 summary
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: k6-summary-server
+          path: k6-summary.json
+          if-no-files-found: ignore
+          retention-days: 30
+
+  # ---------------------------------------------------------------------------
+  ci:
+    name: "Load → throwaway stack (${{ needs.settings.outputs.vus }} users)"
+    needs: settings
+    if: inputs.target == 'ci'
+    runs-on: ubuntu-24.04-arm
+    timeout-minutes: 50
+    env:
+      BASE_URL: http://localhost:8080
+      OTEL_AGENT_VERSION: "2.31.1"
+      OTLP_ENDPOINT: ${{ vars.OTEL_EXPORTER_OTLP_ENDPOINT }}
+      OTLP_HEADERS: ${{ secrets.OTEL_EXPORTER_OTLP_HEADERS }}
+    steps:
+      - uses: actions/checkout@v7
+
+      - uses: actions/setup-java@v6
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - uses: gradle/actions/setup-gradle@v6
+
+      - name: Build the app
+        run: ./gradlew bootJar --no-daemon -x test
+
+      - name: Start PostGIS (same image and tuning flags as compose.yaml on the Mac)
+        run: docker compose up --detach --wait
+
+      - name: Start the app (with the OTel agent if Grafana is configured)
+        run: |
+          if [ -n "$OTLP_ENDPOINT" ] && [ -n "$OTLP_HEADERS" ]; then
+            curl -fsSL -o otel-agent.jar \
+              "https://github.com/open-telemetry/opentelemetry-java-instrumentation/releases/download/v${OTEL_AGENT_VERSION}/opentelemetry-javaagent.jar"
+            export OTEL_SERVICE_NAME=ladebahn
+            export OTEL_EXPORTER_OTLP_PROTOCOL=http/protobuf
+            export OTEL_EXPORTER_OTLP_ENDPOINT="$OTLP_ENDPOINT"
+            export OTEL_EXPORTER_OTLP_HEADERS="$OTLP_HEADERS"
+            export OTEL_METRICS_EXPORTER=otlp OTEL_TRACES_EXPORTER=otlp OTEL_LOGS_EXPORTER=none
+            export OTEL_RESOURCE_ATTRIBUTES="deployment.environment=ci,service.version=${GITHUB_SHA::7}"
+            agent=(-javaagent:otel-agent.jar)
+            echo "Telemetry: on (deployment.environment=ci)"
+          else
+            agent=()
+            echo "::notice::Grafana is not configured (OTEL_EXPORTER_OTLP_ENDPOINT / _HEADERS), so this run has k6 numbers only."
+          fi
+          export OTLP_AUTH_HEADER=""   # placeholder referenced by application.yml
+          nohup java "${agent[@]}" -jar build/libs/ladebahn-0.0.1-SNAPSHOT.jar > app.log 2>&1 &
+          for _ in $(seq 1 60); do
+            if curl -fsS localhost:8080/actuator/health >/dev/null 2>&1; then echo "app is up"; exit 0; fi
+            sleep 2
+          done
+          echo "::error::The app did not become healthy within 2 minutes"; tail -50 app.log; exit 1
+
+      - name: Seed the standard dataset (large, seed 42)
+        run: |
+          curl -fsS -X POST -H "X-Lab-Token: local-dev-token" \
+            "localhost:8080/admin/seed?scale=large&randomSeed=42"
+          echo
+
+      - uses: grafana/setup-k6-action@v1
+        with:
+          k6-version: ${{ env.K6_VERSION }}
+
+      - name: Run k6
+        id: k6
+        env:
+          TARGET: ci
+          VUS: ${{ needs.settings.outputs.vus }}
+          DURATION: ${{ needs.settings.outputs.duration }}
+          LAB: ${{ inputs.lab }}
+          LAB_PARAM: ${{ inputs.lab_param }}
+          SWITCH_ON_AT: ${{ inputs.switch_on_at }}
+          SWITCH_OFF_AT: ${{ inputs.switch_off_at }}
+          LAB_TOKEN: local-dev-token
+        run: |
+          echo "start_ms=$(date +%s%3N)" >> "$GITHUB_OUTPUT"
+          k6 run k6/lab-run.js
+
+      - name: Results page
+        if: always()
+        env:
+          START_MS: ${{ steps.k6.outputs.start_ms }}
+          GRAFANA_URL: ${{ vars.GRAFANA_URL }}
+          TELEMETRY: ${{ vars.OTEL_EXPORTER_OTLP_ENDPOINT != '' }}
+        run: bash .github/scripts/load-summary.sh ci
+
+      - name: Keep the raw k6 summary and the app log
+        if: always()
+        uses: actions/upload-artifact@v7
+        with:
+          name: k6-summary-ci
+          path: |
+            k6-summary.json
+            app.log
+          if-no-files-found: ignore
+          retention-days: 30

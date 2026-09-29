@@ -1,11 +1,11 @@
 variable "environments" {
-  description = "deployment.environment values the app reports (local = the Mac, server = the demo VM)"
+  description = "deployment.environment values the app reports (local = the Mac, server = the demo VM, ci = the throwaway stack in GitHub Actions)"
   type        = list(string)
-  default     = ["local", "server"]
+  default     = ["local", "server", "ci"]
 
   validation {
-    condition     = alltrue([for e in var.environments : contains(["local", "server"], e)])
-    error_message = "Environments must be local and/or server — the values in OTEL_RESOURCE_ATTRIBUTES."
+    condition     = alltrue([for e in var.environments : contains(["local", "server", "ci"], e)])
+    error_message = "Environments must be local, server and/or ci — the values in OTEL_RESOURCE_ATTRIBUTES."
   }
 }
 

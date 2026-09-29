@@ -1,0 +1,81 @@
+# Production stack on the demo server (x86_64). Secrets come from .env next to this file,
+# which never leaves the server. The app image is set by deploy/remote-deploy.sh
+# (APP_IMAGE / APP_VERSION in .env). Never "down -v": it deletes the database and the
+# TLS certificate.
+services:
+  db:
+    build: ./docker/postgres
+    image: ladebahn/postgres:16-postgis
+    container_name: ladebahn-db
+    environment:
+      POSTGRES_DB: ladebahn
+      POSTGRES_USER: ladebahn
+      POSTGRES_PASSWORD: ${DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    command:
+      - postgres
+      - -c
+      - shared_preload_libraries=pg_stat_statements
+      - -c
+      - pg_stat_statements.track=all
+      - -c
+      - shared_buffers=256MB
+      - -c
+      - work_mem=8MB
+      - -c
+      - effective_cache_size=768MB
+      - -c
+      - max_connections=50
+      - -c
+      - log_min_duration_statement=500
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ladebahn -d ladebahn"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    restart: unless-stopped
+
+  app:
+    # Normally a published image, deployed by the GitHub Action. "build" stays as a
+    # manual fallback: docker compose -f compose.prod.yaml up -d --build app
+    build: .
+    image: ${APP_IMAGE:-ladebahn/app:latest}
+    container_name: ladebahn-app
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      SPRING_DATASOURCE_URL: jdbc:postgresql://db:5432/ladebahn
+      SPRING_DATASOURCE_USERNAME: ladebahn
+      SPRING_DATASOURCE_PASSWORD: ${DB_PASSWORD}
+      LAB_TOKEN: ${LAB_TOKEN}
+      OTEL_SERVICE_NAME: ladebahn
+      OTEL_EXPORTER_OTLP_PROTOCOL: http/protobuf
+      OTEL_EXPORTER_OTLP_ENDPOINT: ${OTEL_EXPORTER_OTLP_ENDPOINT}
+      OTEL_EXPORTER_OTLP_HEADERS: ${OTEL_EXPORTER_OTLP_HEADERS}
+      OTEL_METRICS_EXPORTER: otlp
+      OTEL_TRACES_EXPORTER: otlp
+      OTEL_LOGS_EXPORTER: none
+      OTEL_RESOURCE_ATTRIBUTES: "deployment.environment=server,service.version=${APP_VERSION:-0.1.0}"
+    mem_limit: 1500m
+    restart: unless-stopped
+
+  caddy:
+    image: caddy:2-alpine
+    container_name: ladebahn-caddy
+    depends_on:
+      - app
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    restart: unless-stopped
+
+volumes:
+  pgdata:
+  caddy_data:
+  caddy_config:
